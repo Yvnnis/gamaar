@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import Navbar from "../../components/Navbar";
@@ -103,7 +103,6 @@ const SearchCard = ({ item }: { item: any }) => {
                     width: "100%", 
                     height: "100%", 
                     objectFit: "cover",
-                    // Si c'est une personne, on peut garder l'image rectangulaire ou la traiter différemment, ici on laisse standard pour la grille
                 }} 
             />
           ) : (
@@ -132,8 +131,9 @@ const SearchCard = ({ item }: { item: any }) => {
   );
 };
 
-// --- 3. PAGE PRINCIPALE ---
-export default function SearchPage() {
+// --- 3. PAGE PRINCIPALE (CONTENU) ---
+// On renome ton ancienne fonction "SearchPage" en "SearchContent"
+function SearchContent() {
   const searchParams = useSearchParams();
   const query = searchParams.get("q");
 
@@ -186,7 +186,6 @@ export default function SearchPage() {
         let processedResults: any[] = [];
         
         finalResults.forEach((item: any) => {
-            // 🔥 MODIFICATION ICI : On garde les personnes telles quelles !
             if (item.media_type === "movie" || item.media_type === "tv" || item.media_type === "person") {
                 processedResults.push(item);
             }
@@ -235,5 +234,18 @@ export default function SearchPage() {
         )}
       </div>
     </div>
+  );
+}
+
+// --- 4. EXPORT PAR DÉFAUT (WRAPPER SUSPENSE) ---
+export default function SearchPage() {
+  return (
+    <Suspense fallback={
+        <div style={{ minHeight: "100vh", backgroundColor: "#141414", color: "white", display: "flex", justifyContent: "center", alignItems: "center" }}>
+            Chargement de la recherche...
+        </div>
+    }>
+      <SearchContent />
+    </Suspense>
   );
 }
