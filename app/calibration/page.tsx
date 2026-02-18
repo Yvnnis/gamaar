@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 
@@ -70,7 +70,6 @@ const AVATAR_MAP = [
   },
   { 
     id: "comedy", 
-    // ✅ CORRECTION ICI : 'smileBig' fonctionne mieux que 'laugh'
     src: "https://api.dicebear.com/9.x/open-peeps/svg?seed=Buddy&face=smileBig", 
     label: "Le Rigolo", 
     sub: "Comédie",
@@ -112,7 +111,8 @@ const DILEMMAS = [
 
 type StepType = 'LOADING' | 'IDENTITY' | 'QUIZ' | 'FAVORITES' | 'GRID' | 'SAVING';
 
-export default function CalibrationUltimatePage() {
+// 1. On renome ton composant principal en "CalibrationContent" (C'est le contenu interne)
+function CalibrationContent() {
   const supabase = createClient();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -370,7 +370,6 @@ export default function CalibrationUltimatePage() {
                   <img src={av.src} style={styles.avatarImg} alt={av.label} />
                   <div style={{ fontWeight: "bold", fontSize: "1.1rem", color: "#222" }}>{av.label}</div>
                   
-                  {/* ✅ MODIFICATION ICI : TEXTE ROUGE */}
                   <div style={{ fontSize: "0.8rem", color: "#e50914", fontWeight: "bold", marginTop: "5px" }}>{av.sub}</div>
                 </div>
               );
@@ -504,6 +503,19 @@ export default function CalibrationUltimatePage() {
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
       `}</style>
     </div>
+  );
+}
+
+// 2. Le vrai composant par défaut est maintenant un wrapper qui utilise Suspense
+export default function CalibrationUltimatePage() {
+  return (
+    <Suspense fallback={
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "#141414" }}>
+        <div className="spinner" style={{ width: "50px", height: "50px", border: "4px solid #333", borderTop: "4px solid #e50914", borderRadius: "50%" }}></div>
+      </div>
+    }>
+      <CalibrationContent />
+    </Suspense>
   );
 }
 
