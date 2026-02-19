@@ -14,7 +14,6 @@ const AVATARS_LIST = [
   "https://api.dicebear.com/9.x/open-peeps/svg?seed=Molly&face=cute",
   "https://api.dicebear.com/9.x/open-peeps/svg?seed=Boo&face=concerned",
   "https://api.dicebear.com/9.x/open-peeps/svg?seed=Buddy&face=smileBig",
-  // Ajout de quelques variations supplémentaires pour avoir du choix
   "https://api.dicebear.com/9.x/open-peeps/svg?seed=Lucky&glasses=sunglasses",
   "https://api.dicebear.com/9.x/open-peeps/svg?seed=Midnight&face=suspicious"
 ];
@@ -87,7 +86,16 @@ export default function ProfilePage() {
   const [pendingRequests, setPendingRequests] = useState<any[]>([]);
 
   const [profile, setProfile] = useState<any>(null);
-  const [formData, setFormData] = useState({ username: "", bio: "" });
+  
+  // ✅ MODIFICATION : Ajout des favoris dans le formulaire
+  const [formData, setFormData] = useState({ 
+      username: "", 
+      bio: "",
+      favMovie: "",
+      favDirector: "",
+      favActor: ""
+  });
+  
   const [friends, setFriends] = useState<any[]>([]);
   const [watchlist, setWatchlist] = useState<any[]>([]); 
 
@@ -104,7 +112,14 @@ export default function ProfilePage() {
     const { data: myProfile } = await supabase.from("profiles").select("*").eq("id", user.id).single();
     if (myProfile) {
         setProfile(myProfile);
-        setFormData({ username: myProfile.username || "", bio: myProfile.bio || "" });
+        // ✅ On pré-remplit les inputs avec les données de Supabase
+        setFormData({ 
+            username: myProfile.username || "", 
+            bio: myProfile.bio || "",
+            favMovie: myProfile.preferences?.favorites?.movie || "",
+            favDirector: myProfile.preferences?.favorites?.director || "",
+            favActor: myProfile.preferences?.favorites?.actor || ""
+        });
     }
 
     const { data: interactions } = await supabase
@@ -185,8 +200,25 @@ export default function ProfilePage() {
 
   const handleSaveProfile = async () => {
     if (!profile) return;
-    await supabase.from("profiles").update({ username: formData.username, bio: formData.bio }).eq("id", userId);
-    setProfile({ ...profile, ...formData });
+
+    // ✅ MODIFICATION : On met à jour les préférences sans écraser le reste
+    const currentPrefs = profile.preferences || {};
+    const updatedPrefs = {
+        ...currentPrefs,
+        favorites: {
+            movie: formData.favMovie,
+            director: formData.favDirector,
+            actor: formData.favActor
+        }
+    };
+
+    await supabase.from("profiles").update({ 
+        username: formData.username, 
+        bio: formData.bio,
+        preferences: updatedPrefs
+    }).eq("id", userId);
+    
+    setProfile({ ...profile, username: formData.username, bio: formData.bio, preferences: updatedPrefs });
     setIsEditing(false);
   };
 
@@ -205,102 +237,51 @@ export default function ProfilePage() {
   };
 
   const handleAddFriend = async () => {
+    // ... Gardé identique (logique d'ajout d'ami)
     setFriendStatus({ type: null, msg: "" });
-
-    if (!friendInput.includes("#")) {
-        setFriendStatus({ type: 'error', msg: "Format invalide. Utilisez Pseudo#Tag" });
-        return;
-    }
-
+    if (!friendInput.includes("#")) { setFriendStatus({ type: 'error', msg: "Format invalide. Utilisez Pseudo#Tag" }); return; }
     const [targetUsername, targetDiscriminator] = friendInput.split("#");
-    if (!targetUsername || !targetDiscriminator) {
-        setFriendStatus({ type: 'error', msg: "Pseudo ou Tag manquant." });
-        return;
-    }
+    if (!targetUsername || !targetDiscriminator) { setFriendStatus({ type: 'error', msg: "Pseudo ou Tag manquant." }); return; }
 
     try {
-        const { data: targetUser, error: searchError } = await supabase
-            .from("profiles")
-            .select("id, username")
-            .eq("username", targetUsername.trim())
-            .eq("discriminator", targetDiscriminator.trim())
-            .single();
+        const { data: targetUser, error: searchError } = await supabase.from("profiles").select("id, username").eq("username", targetUsername.trim()).eq("discriminator", targetDiscriminator.trim()).single();
+        if (searchError || !targetUser) { setFriendStatus({ type: 'error', msg: "Utilisateur introuvable 🧐" }); return; }
+        if (targetUser.id === userId) { setFriendStatus({ type: 'error', msg: "Tu ne peux pas t'ajouter toi-même 😉" }); return; }
 
-        if (searchError || !targetUser) {
-            setFriendStatus({ type: 'error', msg: "Utilisateur introuvable 🧐" });
-            return;
-        }
-
-        if (targetUser.id === userId) {
-            setFriendStatus({ type: 'error', msg: "Tu ne peux pas t'ajouter toi-même 😉" });
-            return;
-        }
-
-        const { data: existingFriendship } = await supabase
-            .from("friendships")
-            .select("*")
-            .or(`and(user_id.eq.${userId},friend_id.eq.${targetUser.id}),and(user_id.eq.${targetUser.id},friend_id.eq.${userId})`)
-            .single();
-
+        const { data: existingFriendship } = await supabase.from("friendships").select("*").or(`and(user_id.eq.${userId},friend_id.eq.${targetUser.id}),and(user_id.eq.${targetUser.id},friend_id.eq.${userId})`).single();
         if (existingFriendship) {
-            if (existingFriendship.status === 'accepted') {
-                setFriendStatus({ type: 'error', msg: "Vous êtes déjà amis ! 🎉" });
-            } else if (existingFriendship.status === 'pending') {
-                setFriendStatus({ type: 'error', msg: "Une demande est déjà en cours ⏳" });
-            } else {
-                 setFriendStatus({ type: 'error', msg: "Impossible d'ajouter cet utilisateur." });
-            }
+            if (existingFriendship.status === 'accepted') setFriendStatus({ type: 'error', msg: "Vous êtes déjà amis ! 🎉" });
+            else if (existingFriendship.status === 'pending') setFriendStatus({ type: 'error', msg: "Une demande est déjà en cours ⏳" });
+            else setFriendStatus({ type: 'error', msg: "Impossible d'ajouter cet utilisateur." });
             return;
         }
 
-        const { error: insertError } = await supabase
-            .from("friendships")
-            .insert({
-                user_id: userId,
-                friend_id: targetUser.id,
-                status: 'pending' 
-            });
-
+        const { error: insertError } = await supabase.from("friendships").insert({ user_id: userId, friend_id: targetUser.id, status: 'pending' });
         if (insertError) throw insertError;
 
         setFriendStatus({ type: 'success', msg: `Demande envoyée à ${targetUser.username} ! 🚀` });
         setFriendInput(""); 
-
-    } catch (e) {
-        setFriendStatus({ type: 'error', msg: "Erreur serveur. Réessayez plus tard." });
-    }
+    } catch (e) { setFriendStatus({ type: 'error', msg: "Erreur serveur. Réessayez plus tard." }); }
   };
 
   const handleAcceptRequest = async (senderId: string) => {
       try {
-          await supabase
-            .from("friendships")
-            .update({ status: 'accepted' })
-            .eq("user_id", senderId) 
-            .eq("friend_id", userId); 
-
+          await supabase.from("friendships").update({ status: 'accepted' }).eq("user_id", senderId).eq("friend_id", userId); 
           const newFriend = pendingRequests.find(p => p.id === senderId);
           if (newFriend) {
               setFriends(prev => [...prev, newFriend]); 
               setPendingRequests(prev => prev.filter(p => p.id !== senderId)); 
               setStats(prev => ({ ...prev, friends: prev.friends + 1 })); 
           }
-
       } catch (e) { console.error(e); }
   };
 
   const handleDeclineRequest = async (senderId: string) => {
       try {
-          await supabase
-            .from("friendships")
-            .delete()
-            .eq("user_id", senderId)
-            .eq("friend_id", userId);
-
+          await supabase.from("friendships").delete().eq("user_id", senderId).eq("friend_id", userId);
           setPendingRequests(prev => prev.filter(p => p.id !== senderId));
       } catch (e) { console.error(e); }
   };
-
 
   if (loading) return <div style={{minHeight:"100vh", background:"#141414", display:"flex", alignItems:"center", justifyContent:"center", color:"white"}}>Chargement...</div>;
 
@@ -311,7 +292,7 @@ export default function ProfilePage() {
       <div style={{ maxWidth: "1000px", margin: "0 auto", padding: "40px 20px" }}>
         
         {/* HEADER */}
-        <div style={{ display: "flex", gap: "30px", alignItems: "center", marginBottom: "40px", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: "30px", alignItems: "flex-start", marginBottom: "40px", flexWrap: "wrap" }}>
              <div style={{ position: "relative" }}>
                 <div onClick={() => setShowAvatarModal(true)} style={{ width: "120px", height: "120px", borderRadius: "50%", border: "3px solid #e50914", overflow: "hidden", cursor: "pointer", position: "relative", backgroundColor: "white" }}>
                     <img src={profile?.avatar_url} style={{ width: "100%", height: "100%", objectFit: "contain", padding:"5px" }} />
@@ -321,15 +302,29 @@ export default function ProfilePage() {
 
              <div style={{ flex: 1 }}>
                 {isEditing ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "10px", maxWidth: "400px" }}>
+                    // ✅ MODIFICATION : Formulaire complet avec Bio, Pseudo et Favoris
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px", maxWidth: "450px" }}>
                         <label style={{ fontSize: "0.8rem", color: "#888", marginBottom: "-5px" }}>Pseudo</label>
                         <input value={formData.username} onChange={e => setFormData({...formData, username: e.target.value})} style={{background: "#333", border: "1px solid #555", color: "white", padding: "10px", borderRadius: "5px", outline: "none", fontSize: "1rem"}} />
+                        
                         <label style={{ fontSize: "0.8rem", color: "#888", marginBottom: "-5px" }}>Biographie</label>
                         <textarea value={formData.bio} onChange={e => setFormData({...formData, bio: e.target.value})} rows={3} maxLength={150} style={{background: "#333", border: "1px solid #555", color: "white", padding: "10px", borderRadius: "5px", outline: "none", fontSize: "0.95rem", resize: "none", fontFamily: "inherit"}} />
-                        <div style={{ textAlign: "right", fontSize: "0.7rem", color: "#666" }}>{formData.bio.length}/150</div>
-                        <div style={{display:"flex", gap:"10px", marginTop: "5px"}}>
-                            <button onClick={handleSaveProfile} style={{background:"#e50914", color:"white", border:"none", padding:"8px 20px", borderRadius:"5px", cursor:"pointer", fontWeight:"bold"}}>Sauvegarder</button>
-                            <button onClick={() => setIsEditing(false)} style={{background:"transparent", border:"1px solid #555", color:"#aaa", padding:"8px 20px", borderRadius:"5px", cursor:"pointer"}}>Annuler</button>
+                        <div style={{ textAlign: "right", fontSize: "0.7rem", color: "#666", marginTop: "-5px" }}>{formData.bio.length}/150</div>
+                        
+                        <h4 style={{ color: "#e50914", margin: "10px 0 5px 0", borderBottom: "1px solid #333", paddingBottom: "5px" }}>Références pour l'algorithme</h4>
+                        
+                        <label style={{ fontSize: "0.8rem", color: "#888", marginBottom: "-5px" }}>Film Culte</label>
+                        <input value={formData.favMovie} onChange={e => setFormData({...formData, favMovie: e.target.value})} placeholder="Ex: Interstellar" style={{background: "#333", border: "1px solid #555", color: "white", padding: "10px", borderRadius: "5px", outline: "none", fontSize: "0.95rem"}} />
+                        
+                        <label style={{ fontSize: "0.8rem", color: "#888", marginBottom: "-5px" }}>Réalisateur favori</label>
+                        <input value={formData.favDirector} onChange={e => setFormData({...formData, favDirector: e.target.value})} placeholder="Ex: Christopher Nolan" style={{background: "#333", border: "1px solid #555", color: "white", padding: "10px", borderRadius: "5px", outline: "none", fontSize: "0.95rem"}} />
+                        
+                        <label style={{ fontSize: "0.8rem", color: "#888", marginBottom: "-5px" }}>Acteur / Actrice favori(te)</label>
+                        <input value={formData.favActor} onChange={e => setFormData({...formData, favActor: e.target.value})} placeholder="Ex: Leonardo DiCaprio" style={{background: "#333", border: "1px solid #555", color: "white", padding: "10px", borderRadius: "5px", outline: "none", fontSize: "0.95rem"}} />
+
+                        <div style={{display:"flex", gap:"10px", marginTop: "15px"}}>
+                            <button onClick={handleSaveProfile} style={{flex: 1, background:"#e50914", color:"white", border:"none", padding:"12px 20px", borderRadius:"5px", cursor:"pointer", fontWeight:"bold"}}>Sauvegarder</button>
+                            <button onClick={() => setIsEditing(false)} style={{background:"transparent", border:"1px solid #555", color:"#aaa", padding:"12px 20px", borderRadius:"5px", cursor:"pointer"}}>Annuler</button>
                         </div>
                     </div>
                 ) : (
@@ -348,13 +343,12 @@ export default function ProfilePage() {
                             <span style={{ color: "#666" }}>•</span>
                             <span style={{ color: "#aaa" }}>{stats.friends} Amis</span>
                         </div>
-                        <p style={{ color: "#ccc", fontStyle: "italic", marginTop: "15px", lineHeight: "1.5" }}>"{profile?.bio || "Pas de bio..."}"</p>
+                        <p style={{ color: "#ccc", fontStyle: "italic", marginTop: "15px", lineHeight: "1.5", maxWidth: "500px" }}>"{profile?.bio || "Pas de bio..."}"</p>
                     </>
                 )}
              </div>
              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                 <button onClick={() => !isEditing && setIsEditing(true)} style={{ background: "#333", border: "1px solid #555", color: "white", padding: "10px 20px", borderRadius: "8px", cursor: "pointer" }}>✏️ Modifier profil</button>
-                 <button onClick={() => router.push("/calibration?rec=true")} style={{ background: "transparent", border: "1px solid #e50914", color: "#e50914", padding: "10px 20px", borderRadius: "8px", cursor: "pointer" }}>🔄 Refaire le quiz</button>
+                 {!isEditing && <button onClick={() => setIsEditing(true)} style={{ background: "#333", border: "1px solid #555", color: "white", padding: "10px 20px", borderRadius: "8px", cursor: "pointer" }}>✏️ Modifier profil</button>}
              </div>
         </div>
 
@@ -532,7 +526,6 @@ export default function ProfilePage() {
                   <h3 style={{ textAlign: "center", marginBottom: "20px" }}>Choisir un Avatar</h3>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "15px", marginBottom: "20px" }}>
                       {AVATARS_LIST.map((url, i) => (
-                          // ✅ FOND BLANC AJOUTÉ ICI pour que le dessin soit visible
                           <img 
                             key={i} 
                             src={url} 
@@ -543,8 +536,8 @@ export default function ProfilePage() {
                                 border: profile.avatar_url === url ? "3px solid #e50914" : "2px solid transparent", 
                                 cursor: "pointer", 
                                 transition: "transform 0.2s",
-                                backgroundColor: "white", // Fond blanc
-                                padding: "5px" // Petit padding
+                                backgroundColor: "white",
+                                padding: "5px"
                             }} 
                           />
                       ))}

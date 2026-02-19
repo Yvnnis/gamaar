@@ -7,16 +7,16 @@ import Navbar from "../../components/Navbar";
 import { useMediaInteraction } from "../../hooks/useMediaInteraction";
 import { createClient } from "@/utils/supabase/client"; 
 
-// --- CONSTANTES ---
-const MOVIE_GENRES: Record<string, string> = { 
-  "VISIONARY": "878,14", "ACTION": "28,12", "EMOTIONAL": "18,10749", 
-  "ANALYST": "9648,80", "THRILL": "27,53", "COMEDY": "35", "INTELLECTUAL": "36,99" 
-};
-
-const TV_GENRES: Record<string, string> = { 
-  "VISIONARY": "10765", "ACTION": "10759", "EMOTIONAL": "18", 
-  "ANALYST": "9648,80", "THRILL": "9648", "COMEDY": "35", "INTELLECTUAL": "99,10768" 
-};
+// --- CATEGORIES (Filtres Rapides avec Exclusions strictes) ---
+const CATEGORIES = [
+  { id: "all", label: "Pour Toi", genres: "", exclude: "" },
+  // ✅ CORRECTION ICI : on a retiré le "16" des exclusions
+  { id: "action", label: "Action & Aventure", genres: "28,12", exclude: "35,10749" }, 
+  { id: "comedy", label: "Comédie", genres: "35", exclude: "18,28,27,53,878" },
+  { id: "thrill", label: "Frissons", genres: "27,53", exclude: "35,10749" },
+  { id: "sf", label: "Sci-Fi", genres: "878,14", exclude: "35,10749" },
+  { id: "drama", label: "Émotion", genres: "18,10749", exclude: "28,35,27,878" },
+];
 
 const ANIMATION_GENRE_ID = 16;
 const GENRE_MAP_MOVIE_TO_TV: Record<number, number> = { 28: 10759, 12: 10759, 878: 10765, 14: 10765, 10752: 10768, 27: 9648 };
@@ -43,40 +43,27 @@ const getPersonId = async (query: string, apiKey: string) => {
     } catch (e) { return null; }
 };
 
-// 🧠 SCORING V2 (Avec Pondération Temporelle)
-const calculateMatch = (item: any, mood: any, archetype: string, mode: 'classics' | 'modern'): { score: number, label: MatchLabel } => {
-    let score = (item.vote_average || 5) * 6; // Base sur 60 points max
+// 🧠 SCORING V3 (Sans Archétype, pur ciblage)
+const calculateMatch = (item: any, mood: any, mode: 'classics' | 'modern'): { score: number, label: MatchLabel } => {
+    let score = (item.vote_average || 5) * 6;
     
-    // 1. Bonus Mood (Le plus fort)
-    if (mood && item.genre_ids) {
+    if (mood && mood.genres && item.genre_ids) {
         const moodGenres = mood.genres.split(',').map(Number);
         if (item.genre_ids.some((id: number) => moodGenres.includes(id) || Object.values(GENRE_MAP_MOVIE_TO_TV).includes(id))) {
-            score += 20;
+            score += 25;
         }
     }
     
-    // 2. Bonus Archétype
-    const archGenres = (MOVIE_GENRES[archetype] || "").split(',').map(Number);
-    if (item.genre_ids && item.genre_ids.some((id: number) => archGenres.includes(id))) {
-        score += 10;
-    }
-
-    // 3. Bonus Popularité / Vote
     if (item.vote_count > 2000) score += 5;
 
-    // 4. 🔥 Bonus "Freshness" (Nouveauté) - Uniquement en mode Moderne
     if (mode === 'modern' && item.release_date) {
         const releaseYear = new Date(item.release_date).getFullYear();
         const currentYear = new Date().getFullYear();
-        if (releaseYear >= currentYear - 1) {
-            score += 10; // Gros bonus pour les films très récents
-        } else if (releaseYear >= currentYear - 3) {
-            score += 5;
-        }
+        if (releaseYear >= currentYear - 1) score += 10; 
+        else if (releaseYear >= currentYear - 3) score += 5;
     }
     
     const finalScore = Math.min(99, Math.max(40, Math.round(score)));
-    
     let label: MatchLabel = "Recommandé";
     if (finalScore >= 90) label = "Match Parfait 🔥";
     else if (finalScore >= 80) label = "Excellent ✨";
@@ -146,7 +133,6 @@ const MovieCard = ({ item, label, onAction, onPass }: { item: MediaItem, label: 
   );
 };
 
-// --- COMPOSANT CARTE TENDANCE ---
 const TrendingCard = ({ movie }: { movie: any }) => {
     const computedType = movie.media_type || (movie.first_air_date ? 'tv' : 'movie');
     const itemWithType = { ...movie, media_type: computedType };
@@ -184,50 +170,60 @@ export default function DashboardPage() {
   
   const [timeFilter, setTimeFilter] = useState<'classics' | 'modern'>('modern'); 
   const [trendingMovies, setTrendingMovies] = useState<any[]>([]);
-  
   const [loading, setLoading] = useState(true);
   
-  const [archetype, setArchetype] = useState("ACTION");
-  const [mood, setMood] = useState<any>(null);
+  const [mood, setMood] = useState<any>(null); // Catégorie sélectionnée
   const [userId, setUserId] = useState<string>("");
   
   const [favDirectorId, setFavDirectorId] = useState<number | null>(null);
   const [favActorId, setFavActorId] = useState<number | null>(null);
 
   const [historySet, setHistorySet] = useState<Set<string>>(new Set());
-  // 💡 NOUVEAU STATE : Stocker le dernier like pour les recommandations
   const [lastLikedItem, setLastLikedItem] = useState<{id: number, type: string} | null>(null);
 
   const fetchingRef = useRef<Record<CategoryKey, boolean>>({ movie: false, series: false, animation: false, anime: false });
 
-  // --- LE CHALUTIER V10 (HYBRIDE : Discover + Recommendations + Serendipity) ---
+  // --- LE CHALUTIER V11 ---
   const fetchBatch = async (
       category: CategoryKey, 
       startPage: number, 
-      currentArch: string, 
       currentMood: any, 
       history: Set<string>,
       mode: 'classics' | 'modern', 
       dirId: number | null,
       actId: number | null,
-      seedItem: {id: number, type: string} | null // L'item source pour les recommandations
+      seedItem: {id: number, type: string} | null 
   ): Promise<{ results: any[], nextPageIndex: number }> => {
       
       const apiKey = process.env.NEXT_PUBLIC_TMDB_API_KEY!;
       const baseUrl = "https://api.themoviedb.org/3";
       
-      // 1. DÉFINITION IMMUTABLE
       let typeToSearch = 'movie';
-      let structuralFilter = ""; 
+      let excludedGenresList = [];
       
       switch (category) {
-        case 'movie': typeToSearch = 'movie'; structuralFilter = `&without_genres=${ANIMATION_GENRE_ID}`; break;
-        case 'series': typeToSearch = 'tv'; structuralFilter = `&without_genres=${ANIMATION_GENRE_ID}`; break;
-        case 'animation': typeToSearch = 'movie'; structuralFilter = `&with_genres=${ANIMATION_GENRE_ID}&without_original_language=ja`; break;
-        case 'anime': typeToSearch = 'tv'; structuralFilter = `&with_genres=${ANIMATION_GENRE_ID}&with_original_language=ja`; break;
+        case 'movie': typeToSearch = 'movie'; excludedGenresList.push(ANIMATION_GENRE_ID); break;
+        case 'series': typeToSearch = 'tv'; excludedGenresList.push(ANIMATION_GENRE_ID); break;
+        case 'animation': typeToSearch = 'movie'; break; // On gérera with_genres=16 plus bas
+        case 'anime': typeToSearch = 'tv'; break;
       }
 
-      // 2. CONFIG FILTRES
+      // Ajout des exclusions strictes de la catégorie choisie
+      if (currentMood && currentMood.exclude) {
+          excludedGenresList.push(currentMood.exclude);
+      }
+
+      let structuralFilter = "";
+      if (excludedGenresList.length > 0 && category !== 'animation' && category !== 'anime') {
+          structuralFilter = `&without_genres=${excludedGenresList.join(',')}`;
+      } else if (category === 'animation' && currentMood && currentMood.exclude) {
+          structuralFilter = `&without_genres=${currentMood.exclude}`;
+      }
+
+      // Filtres pour Animation/Anime
+      if (category === 'animation') structuralFilter += `&with_genres=${ANIMATION_GENRE_ID}&without_original_language=ja`;
+      if (category === 'anime') structuralFilter += `&with_genres=${ANIMATION_GENRE_ID}&with_original_language=ja`;
+
       let dateFilter = "";
       let sortBy = "vote_average.desc"; 
       let minVotes = 100;
@@ -244,75 +240,64 @@ export default function DashboardPage() {
           minVotes = 50; 
       }
 
-      // 3. GENRES (Préférentiels)
-      let moodGenres = "";
-      if (currentMood) {
-          if (typeToSearch === 'tv') moodGenres = convertGenresToTV(currentMood.genres);
-          else moodGenres = currentMood.genres;
-      } else {
-          moodGenres = (category === 'movie' || category === 'animation') ? MOVIE_GENRES[currentArch] : TV_GENRES[currentArch];
-      }
-      
+      // GENRES (Inclusions)
       let preferentialFilter = "";
-      if (category !== 'animation' && category !== 'anime' && moodGenres) {
+      if (currentMood && currentMood.genres && category !== 'animation' && category !== 'anime') {
+          let moodGenres = typeToSearch === 'tv' ? convertGenresToTV(currentMood.genres) : currentMood.genres;
           preferentialFilter = `&with_genres=${moodGenres}`;
       }
 
-      // 4. BOUCLE DE RECHERCHE HYBRIDE
+      // PROFIL UTILISATEUR
+      let castCrewFilter = "";
+      if (dirId) castCrewFilter += `&with_crew=${dirId}`;
+      if (actId) castCrewFilter += `&with_cast=${actId}`;
+
       let collectedItems: any[] = [];
       let currentPage = startPage;
       let attempts = 0;
       const MAX_ATTEMPTS = 5; 
+      
+      const isPourToi = !currentMood || currentMood.id === "all";
 
       while (collectedItems.length < 4 && attempts < MAX_ATTEMPTS) {
           const promises = [];
           
-          // A. REQUÊTE PRINCIPALE (DISCOVER - V9)
-          // Fallback logic inside
           let currentGenreFilter = preferentialFilter;
-          let currentDirFilter = dirId ? `&with_crew=${dirId}` : "";
+          let currentCastCrewFilter = castCrewFilter;
           let currentSort = sortBy;
 
           if (attempts > 1) {
               currentGenreFilter = ""; 
-              currentDirFilter = ""; 
+              currentCastCrewFilter = ""; 
               if (attempts > 3) currentSort = "popularity.desc"; 
           }
 
-          const baseQuery = `${baseUrl}/discover/${typeToSearch}?api_key=${apiKey}&language=fr-FR&sort_by=${currentSort}${structuralFilter}${currentGenreFilter}${dateFilter}${currentDirFilter}&vote_count.gte=${minVotes}&vote_average.gte=${mode==='modern'?5:6.5}&page=${currentPage}`;
+          const baseQuery = `${baseUrl}/discover/${typeToSearch}?api_key=${apiKey}&language=fr-FR&sort_by=${currentSort}${structuralFilter}${currentGenreFilter}${dateFilter}${currentCastCrewFilter}&vote_count.gte=${minVotes}&vote_average.gte=${mode==='modern'?5:6.5}&page=${currentPage}`;
           promises.push(fetch(baseQuery).then(r => r.json()).catch(() => ({ results: [] })));
 
-          // B. REQUÊTE HYBRIDE (RECOMMENDATIONS - V10) 🧠
-          // Si on a un "seedItem" (dernier like) et qu'on est au premier tour
-          if (attempts === 0 && seedItem && seedItem.type === typeToSearch) {
-              // On demande à TMDB : "Donne-moi des films comme celui que j'ai aimé"
+          // On n'utilise les recommandations du "Dernier Like" QUE si on est dans la section "Pour Toi"
+          if (attempts === 0 && seedItem && seedItem.type === typeToSearch && isPourToi) {
               const recoQuery = `${baseUrl}/${typeToSearch}/${seedItem.id}/recommendations?api_key=${apiKey}&language=fr-FR&page=1`;
               promises.push(fetch(recoQuery).then(r => r.json()).catch(() => ({ results: [] })));
           }
 
-          // C. SERENDIPITY (Un peu de hasard qualitatif) 🎲
-          // Une fois de temps en temps, on injecte un Top Rated
           if (attempts === 0 && Math.random() > 0.7) {
                const serendipityQuery = `${baseUrl}/${typeToSearch}/top_rated?api_key=${apiKey}&language=fr-FR&page=${Math.floor(Math.random() * 5) + 1}`;
                promises.push(fetch(serendipityQuery).then(r => r.json()).catch(() => ({ results: [] })));
           }
 
-          // EXÉCUTION
           const results = await Promise.all(promises);
           let rawItems: any[] = [];
           results.forEach(r => { if(r.results) rawItems.push(...r.results); });
 
-          // FILTRAGE
           const validItems = rawItems.filter(item => {
                 if (!item.id) return false;
                 if (history.has(`${typeToSearch}_${item.id}`)) return false;
                 if (collectedItems.some(ci => ci.id === item.id)) return false;
 
-                // Filtre structurel strict
+                // Sécurité supplémentaire : On bloque l'anim dans les films live-action
                 if ((category === 'movie' || category === 'series') && item.genre_ids?.includes(ANIMATION_GENRE_ID)) return false; 
-                if ((category === 'animation' || category === 'anime') && !item.genre_ids?.includes(ANIMATION_GENRE_ID)) return false;
 
-                // Filtre date
                 const date = item.release_date || item.first_air_date;
                 if (date) {
                     const year = new Date(date).getFullYear();
@@ -327,28 +312,25 @@ export default function DashboardPage() {
           attempts++;
       }
 
-      // 5. FORMATAGE & SCORING AMÉLIORÉ
       const finalItems = collectedItems.map(item => {
-            // On passe 'mode' pour le bonus de nouveauté
-            const { score, label } = calculateMatch(item, currentMood, currentArch, mode);
+            const { score, label } = calculateMatch(item, currentMood, mode);
             return { ...item, matchScore: score, matchLabel: label, media_type: typeToSearch };
       });
 
-      // On trie par score pour mettre les "Match Parfait" en premier
       finalItems.sort((a, b) => b.matchScore - a.matchScore);
 
       return { results: finalItems, nextPageIndex: currentPage };
   };
 
-  const initialLoad = async (arch: string, moodObj: any, history: Set<string>, mode: 'classics' | 'modern', dirId: number | null, actId: number | null, lastLike: {id: number, type: string} | null) => {
+  const initialLoad = async (moodObj: any, history: Set<string>, mode: 'classics' | 'modern', dirId: number | null, actId: number | null, lastLike: {id: number, type: string} | null) => {
       setLoading(true);
       const apiKey = process.env.NEXT_PUBLIC_TMDB_API_KEY!;
       
       const [m, s, anim, jap, trends] = await Promise.all([
-          fetchBatch('movie', 1, arch, moodObj, history, mode, dirId, actId, lastLike),
-          fetchBatch('series', 1, arch, moodObj, history, mode, dirId, actId, lastLike),
-          fetchBatch('animation', 1, arch, moodObj, history, mode, dirId, actId, lastLike),
-          fetchBatch('anime', 1, arch, moodObj, history, mode, dirId, actId, lastLike),
+          fetchBatch('movie', 1, moodObj, history, mode, dirId, actId, lastLike),
+          fetchBatch('series', 1, moodObj, history, mode, dirId, actId, lastLike),
+          fetchBatch('animation', 1, moodObj, history, mode, dirId, actId, lastLike),
+          fetchBatch('anime', 1, moodObj, history, mode, dirId, actId, lastLike),
           fetch(`https://api.themoviedb.org/3/trending/all/week?api_key=${apiKey}&language=fr-FR`).then(r => r.json())
       ]);
 
@@ -389,10 +371,8 @@ export default function DashboardPage() {
       setUserId(user.id);
 
       const { data: profile } = await supabase.from("profiles").select("preferences").eq("id", user.id).single();
-      if (!profile?.preferences || !profile.preferences.archetype) { router.push("/calibration"); return; }
+      if (!profile?.preferences?.calibrated) { router.push("/calibration"); return; }
       
-      setArchetype(profile.preferences.archetype || "ACTION");
-
       let dId = null, aId = null;
       const apiKey = process.env.NEXT_PUBLIC_TMDB_API_KEY!;
       if (profile.preferences.favorites) {
@@ -404,30 +384,28 @@ export default function DashboardPage() {
       let parsedMood = null;
       if (storedMood) { try { parsedMood = JSON.parse(storedMood); setMood(parsedMood); } catch(e){} }
 
-      // CHARGEMENT HISTORIQUE & DERNIER LIKE (POUR L'ALGO V10)
-      const { data: interactions } = await supabase
-        .from("user_interactions")
-        .select("tmdb_id, media_type, is_liked, created_at"); // On a besoin de la date pour trouver le dernier
+      const { data: interactions } = await supabase.from("user_interactions").select("tmdb_id, media_type, is_liked, created_at"); 
         
       const newHistorySet = new Set<string>();
       let latestLike = null;
 
       if (interactions) {
-          // Trier par date pour trouver le plus récent
           const sortedInteractions = interactions.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-          
           interactions.forEach(i => newHistorySet.add(`${i.media_type}_${i.tmdb_id}`));
           
-          // Trouver le dernier like pertinent
           const lastLikedInteraction = sortedInteractions.find(i => i.is_liked);
           if (lastLikedInteraction) {
               latestLike = { id: lastLikedInteraction.tmdb_id, type: lastLikedInteraction.media_type };
               setLastLikedItem(latestLike);
           }
       }
-      setHistorySet(newHistorySet);
 
-      await initialLoad(profile.preferences.archetype, parsedMood, newHistorySet, 'modern', dId, aId, latestLike);
+      // ✅ FIX DU REFRESH : On ajoute les films swipés localement à l'historique !
+      const localHistory = JSON.parse(localStorage.getItem("localMediaHistory") || "[]");
+      localHistory.forEach((id: string) => newHistorySet.add(id));
+
+      setHistorySet(newHistorySet);
+      await initialLoad(parsedMood, newHistorySet, 'modern', dId, aId, latestLike);
     };
     init();
   }, []);
@@ -437,7 +415,22 @@ export default function DashboardPage() {
       setPools({ movie: [], series: [], animation: [], anime: [] });
       setCurrentItems({ movie: null, series: null, animation: null, anime: null });
       setPageTrackers({ movie: 1, series: 1, animation: 1, anime: 1 });
-      await initialLoad(archetype, mood, historySet, mode, favDirectorId, favActorId, lastLikedItem);
+      await initialLoad(mood, historySet, mode, favDirectorId, favActorId, lastLikedItem);
+  };
+
+  const handleCategorySelect = async (selectedCat: typeof CATEGORIES[0]) => {
+      const isAll = selectedCat.id === "all";
+      const newMood = isAll ? null : selectedCat;
+      
+      setMood(newMood);
+      if (newMood) localStorage.setItem("currentMood", JSON.stringify(newMood));
+      else localStorage.removeItem("currentMood");
+
+      setPools({ movie: [], series: [], animation: [], anime: [] });
+      setCurrentItems({ movie: null, series: null, animation: null, anime: null });
+      setPageTrackers({ movie: 1, series: 1, animation: 1, anime: 1 });
+      
+      await initialLoad(newMood, historySet, timeFilter, favDirectorId, favActorId, lastLikedItem);
   };
 
   const nextItem = async (category: CategoryKey) => {
@@ -445,9 +438,19 @@ export default function DashboardPage() {
       const current = currentItems[category];
       
       if (current) {
+          const itemKey = `${current.media_type}_${current.id}`;
+          
+          // Mise à jour de l'historique local pour la session en cours
           const newItemHistory = new Set(historySet);
-          newItemHistory.add(`${current.media_type}_${current.id}`);
+          newItemHistory.add(itemKey);
           setHistorySet(newItemHistory);
+
+          // ✅ FIX DU REFRESH : Sauvegarde du swipe dans le navigateur
+          const localHistory = JSON.parse(localStorage.getItem("localMediaHistory") || "[]");
+          if (!localHistory.includes(itemKey)) {
+              localHistory.push(itemKey);
+              localStorage.setItem("localMediaHistory", JSON.stringify(localHistory));
+          }
       }
 
       if (currentPool.length > 0) {
@@ -458,15 +461,14 @@ export default function DashboardPage() {
           
           if (remainingPool.length < 3 && !fetchingRef.current[category]) {
               fetchingRef.current[category] = true;
-              // On passe lastLikedItem pour continuer à alimenter l'algo hybride
-              const { results, nextPageIndex } = await fetchBatch(category, pageTrackers[category], archetype, mood, historySet, timeFilter, favDirectorId, favActorId, lastLikedItem);
+              const { results, nextPageIndex } = await fetchBatch(category, pageTrackers[category], mood, historySet, timeFilter, favDirectorId, favActorId, lastLikedItem);
               setPools(prev => ({ ...prev, [category]: [...prev[category], ...results] }));
               setPageTrackers(prev => ({ ...prev, [category]: nextPageIndex }));
               fetchingRef.current[category] = false;
           }
       } else {
           setLoading(true);
-          const { results, nextPageIndex } = await fetchBatch(category, pageTrackers[category], archetype, mood, historySet, timeFilter, favDirectorId, favActorId, lastLikedItem);
+          const { results, nextPageIndex } = await fetchBatch(category, pageTrackers[category], mood, historySet, timeFilter, favDirectorId, favActorId, lastLikedItem);
           if (results.length > 0) {
               setCurrentItems(prev => ({ ...prev, [category]: results[0] }));
               setPools(prev => ({ ...prev, [category]: results.slice(1) }));
@@ -490,13 +492,29 @@ export default function DashboardPage() {
       <Navbar />
       <div style={{ padding: "40px", maxWidth: "1400px", margin: "0 auto" }}>
         
-        <div style={{ textAlign: "center", marginBottom: "30px" }}>
-            <h1 style={{ fontSize: "2.5rem", marginBottom: "10px" }}>
-              {mood ? `Ta sélection ${mood.label}` : "Ta sélection du moment 🍿"}
-            </h1>
-            <p style={{ color: "#aaa" }}>
-               {mood ? "Le meilleur du cinéma selon ton envie." : `Basé sur ton profil ${archetype}`}
-            </p>
+        {/* --- SELECTEUR DE CATEGORIES (Sans emojis) --- */}
+        <div style={{ display: "flex", justifyContent: "center", flexWrap: "wrap", gap: "12px", marginBottom: "40px", animation: "fadeIn 0.5s" }}>
+            {CATEGORIES.map(cat => {
+                const isActive = mood ? mood.id === cat.id : cat.id === "all";
+                return (
+                    <button
+                        key={cat.id}
+                        onClick={() => handleCategorySelect(cat)}
+                        style={{
+                            padding: "10px 20px", borderRadius: "30px", fontSize: "0.95rem", fontWeight: "bold", cursor: "pointer",
+                            backgroundColor: isActive ? "#e50914" : "#222",
+                            color: "white",
+                            border: isActive ? "none" : "1px solid #444", 
+                            transition: "all 0.2s",
+                            boxShadow: isActive ? "0 4px 15px rgba(229, 9, 20, 0.4)" : "none"
+                        }}
+                        onMouseOver={e => { if(!isActive) e.currentTarget.style.borderColor = "#aaa" }}
+                        onMouseOut={e => { if(!isActive) e.currentTarget.style.borderColor = "#444" }}
+                    >
+                        {cat.label}
+                    </button>
+                )
+            })}
         </div>
 
         <div style={{ display: "flex", justifyContent: "center", gap: "15px", marginBottom: "40px" }}>
@@ -509,7 +527,7 @@ export default function DashboardPage() {
                     border: "1px solid #333", transition: "all 0.2s"
                 }}
             >
-                🏛️ Les Classiques Incontournables
+                🏛️ Les Classiques 
             </button>
             <button 
                 onClick={() => handleFilterChange('modern')}
@@ -520,7 +538,7 @@ export default function DashboardPage() {
                     border: timeFilter === 'modern' ? "none" : "1px solid #333", transition: "all 0.2s"
                 }}
             >
-                🔥 L'Ère Moderne & Tendances
+                🔥 Les Tendances
             </button>
         </div>
 
@@ -555,8 +573,8 @@ export default function DashboardPage() {
             />
         </div>
 
-        {/* --- SECTION TENDANCES --- */}
-        <h2 style={{ borderLeft: "5px solid #e50914", paddingLeft: "15px", marginBottom: "20px", marginTop: "50px" }}>Les tendances mondiales 🔥</h2>
+        {/* --- SECTION SORTIES RÉCEMMENT --- */}
+        <h2 style={{ borderLeft: "5px solid #e50914", paddingLeft: "15px", marginBottom: "20px", marginTop: "50px" }}>Sorties récemment</h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "20px" }}>
             {trendingMovies.slice(0, 12).map((movie) => (
                 <TrendingCard key={movie.id} movie={movie} />
@@ -565,7 +583,7 @@ export default function DashboardPage() {
 
       </div>
       <style jsx>{` 
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } } 
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } } 
         .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.3); border-top: 4px solid #e50914; borderRadius: 50%; animation: spin 1s linear infinite; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
       `}</style>
