@@ -6,6 +6,7 @@ import Link from "next/link";
 import Navbar from "../../components/Navbar";
 import { useMediaInteraction } from "../../hooks/useMediaInteraction";
 import { createClient } from "@/utils/supabase/client"; 
+import { useRefillingRail, RailItem } from "../../hooks/useRefillingRail";
 
 // --- CATEGORIES (Filtres Rapides avec Exclusions strictes) ---
 const CATEGORIES = [
@@ -123,7 +124,7 @@ const MovieCard = ({ item, label, onAction, onPass }: { item: MediaItem, label: 
           
           <div style={{ display: "flex", gap: "10px", marginTop: "auto", paddingTop: "15px" }}>
               <Link href={link} style={{ flex: 1, textDecoration: "none" }}>
-                 <div style={{ textAlign: "center", padding: "10px", border: "1px solid #555", borderRadius: "5px", color: "white", fontWeight: "bold", cursor: "pointer", transition: "0.2s", fontSize: "0.8rem", backgroundColor: "#222" }}>DÉTAILS</div>
+                 <div className="cta" style={{ textAlign: "center", padding: "10px", border: "1px solid #555", borderRadius: "5px", color: "white", fontWeight: "bold", cursor: "pointer", transition: "0.2s", fontSize: "0.8rem", backgroundColor: "#222" }}>DÉTAILS</div>
               </Link>
               <button onClick={(e) => { e.preventDefault(); onPass(); }} style={{ flex: 1, padding: "10px", border: "1px solid #555", borderRadius: "5px", color: "#ccc", background: "transparent", cursor: "pointer", fontSize: "0.8rem" }}>SUIVANT ⏩</button>
           </div>
@@ -133,11 +134,28 @@ const MovieCard = ({ item, label, onAction, onPass }: { item: MediaItem, label: 
   );
 };
 
-const TrendingCard = ({ movie }: { movie: any }) => {
+// --- SOURCE "SORTIES RÉCEMMENT" (paginée, sans les fiches "person") ---
+const fetchTrendingAllPage = async (page: number) => {
+    const apiKey = process.env.NEXT_PUBLIC_TMDB_API_KEY!;
+    const data = await fetch(`https://api.themoviedb.org/3/trending/all/week?api_key=${apiKey}&language=fr-FR&page=${page}`).then(r => r.json());
+    return {
+        results: (data.results || []).filter((m: any) => m.media_type === 'movie' || m.media_type === 'tv'),
+        total_pages: data.total_pages,
+    };
+};
+const mediaKey = (m: RailItem) => `${m.media_type || (m.first_air_date ? 'tv' : 'movie')}_${m.id}`;
+
+const TrendingCard = ({ movie, onInteract }: { movie: any, onInteract: () => void }) => {
     const computedType = movie.media_type || (movie.first_air_date ? 'tv' : 'movie');
     const itemWithType = { ...movie, media_type: computedType };
     const { inList, isSeen, isLiked, toggleList, toggleSeen, toggleLiked } = useMediaInteraction(itemWithType, computedType);
     const title = movie.title || movie.name;
+
+    // Après une action, la carte disparaît et une nouvelle prend sa place
+    const handle = async (action: () => Promise<void>) => {
+        await action();
+        setTimeout(onInteract, 300);
+    };
 
     return (
         <div style={{ borderRadius: "10px", overflow: "hidden", backgroundColor: "#1f1f1f", transition: "transform 0.2s", display: "flex", flexDirection: "column" }} onMouseOver={(e) => e.currentTarget.style.transform = "scale(1.03)"} onMouseOut={(e) => e.currentTarget.style.transform = "scale(1)"}>
@@ -147,9 +165,9 @@ const TrendingCard = ({ movie }: { movie: any }) => {
                 ) : <div style={{width:"100%", aspectRatio:"2/3", background:"#333"}}></div>}
             </Link>
             <div style={{ display: "flex", borderTop: "1px solid #333" }}>
-                <button onClick={(e) => {e.preventDefault(); toggleList()}} style={{ flex: 1, background: inList ? "#e50914" : "transparent", border: "none", borderRight: "1px solid #333", color: "white", padding: "8px", cursor: "pointer", fontSize: "0.8rem" }}>{inList ? "✓" : "+"}</button>
-                <button onClick={(e) => {e.preventDefault(); toggleSeen()}} style={{ flex: 1, background: isSeen ? "#46d369" : "transparent", border: "none", borderRight: "1px solid #333", color: "white", padding: "8px", cursor: "pointer", fontSize: "0.8rem" }}>{isSeen ? "✓" : "👁️"}</button>
-                <button onClick={(e) => {e.preventDefault(); toggleLiked()}} style={{ flex: 1, background: isLiked ? "#e50914" : "transparent", border: "none", color: "white", padding: "8px", cursor: "pointer", fontSize: "0.8rem" }}>{isLiked ? "❤️" : "🤍"}</button>
+                <button onClick={(e) => {e.preventDefault(); handle(toggleList)}} style={{ flex: 1, background: inList ? "#e50914" : "transparent", border: "none", borderRight: "1px solid #333", color: "white", padding: "8px", cursor: "pointer", fontSize: "0.8rem" }}>{inList ? "✓" : "+"}</button>
+                <button onClick={(e) => {e.preventDefault(); handle(toggleSeen)}} style={{ flex: 1, background: isSeen ? "#46d369" : "transparent", border: "none", borderRight: "1px solid #333", color: "white", padding: "8px", cursor: "pointer", fontSize: "0.8rem" }}>{isSeen ? "✓" : "👁️"}</button>
+                <button onClick={(e) => {e.preventDefault(); handle(toggleLiked)}} style={{ flex: 1, background: isLiked ? "#e50914" : "transparent", border: "none", color: "white", padding: "8px", cursor: "pointer", fontSize: "0.8rem" }}>{isLiked ? "❤️" : "🤍"}</button>
             </div>
             <div style={{ padding: "10px" }}>
                 <p style={{ margin: 0, fontSize: "0.85rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: "bold" }}>{title}</p>
@@ -169,7 +187,16 @@ export default function DashboardPage() {
   const [pageTrackers, setPageTrackers] = useState<Record<CategoryKey, number>>({ movie: 1, series: 1, animation: 1, anime: 1 });
   
   const [timeFilter, setTimeFilter] = useState<'classics' | 'modern'>('modern'); 
-  const [trendingMovies, setTrendingMovies] = useState<any[]>([]);
+  // Rail "Sorties récemment" : se recharge quand on ajoute / like / marque vu
+  const trendingExcludeRef = useRef<Set<string>>(new Set());
+  const [historyReady, setHistoryReady] = useState(false);
+  const recentRail = useRefillingRail({
+      fetchPage: fetchTrendingAllPage,
+      keyOf: mediaKey,
+      excludeRef: trendingExcludeRef,
+      enabled: historyReady,
+      targetSize: 18, // on en affiche 12, on garde un petit stock d'avance
+  });
   const [loading, setLoading] = useState(true);
   
   const [mood, setMood] = useState<any>(null); // Catégorie sélectionnée
@@ -326,12 +353,11 @@ export default function DashboardPage() {
       setLoading(true);
       const apiKey = process.env.NEXT_PUBLIC_TMDB_API_KEY!;
       
-      const [m, s, anim, jap, trends] = await Promise.all([
+      const [m, s, anim, jap] = await Promise.all([
           fetchBatch('movie', 1, moodObj, history, mode, dirId, actId, lastLike),
           fetchBatch('series', 1, moodObj, history, mode, dirId, actId, lastLike),
           fetchBatch('animation', 1, moodObj, history, mode, dirId, actId, lastLike),
           fetchBatch('anime', 1, moodObj, history, mode, dirId, actId, lastLike),
-          fetch(`https://api.themoviedb.org/3/trending/all/week?api_key=${apiKey}&language=fr-FR`).then(r => r.json())
       ]);
 
       setCurrentItems({ 
@@ -354,12 +380,6 @@ export default function DashboardPage() {
           animation: anim.nextPageIndex,
           anime: jap.nextPageIndex
       });
-
-      const cleanTrends = (trends.results || []).filter((m: any) => {
-          const type = m.media_type || (m.first_air_date ? 'tv' : 'movie');
-          return !history.has(`${type}_${m.id}`);
-      });
-      setTrendingMovies(cleanTrends);
 
       setLoading(false);
   };
@@ -384,7 +404,7 @@ export default function DashboardPage() {
       let parsedMood = null;
       if (storedMood) { try { parsedMood = JSON.parse(storedMood); setMood(parsedMood); } catch(e){} }
 
-      const { data: interactions } = await supabase.from("user_interactions").select("tmdb_id, media_type, is_liked, created_at"); 
+      const { data: interactions } = await supabase.from("user_interactions").select("tmdb_id, media_type, is_liked, created_at").eq("user_id", user.id); // ⚠️ filtre user obligatoire
         
       const newHistorySet = new Set<string>();
       let latestLike = null;
@@ -405,6 +425,8 @@ export default function DashboardPage() {
       localHistory.forEach((id: string) => newHistorySet.add(id));
 
       setHistorySet(newHistorySet);
+      newHistorySet.forEach(k => trendingExcludeRef.current.add(k));
+      setHistoryReady(true);
       await initialLoad(parsedMood, newHistorySet, 'modern', dId, aId, latestLike);
     };
     init();
@@ -576,10 +598,13 @@ export default function DashboardPage() {
         {/* --- SECTION SORTIES RÉCEMMENT --- */}
         <h2 style={{ borderLeft: "5px solid #e50914", paddingLeft: "15px", marginBottom: "20px", marginTop: "50px" }}>Sorties récemment</h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "20px" }}>
-            {trendingMovies.slice(0, 12).map((movie) => (
-                <TrendingCard key={movie.id} movie={movie} />
+            {recentRail.items.slice(0, 12).map((movie) => (
+                <TrendingCard key={mediaKey(movie)} movie={movie} onInteract={() => recentRail.remove(movie)} />
             ))}
         </div>
+        {!recentRail.loading && recentRail.items.length === 0 && (
+            <p style={{ color: "#555" }}>Tu es à jour sur toutes les sorties du moment 👏</p>
+        )}
 
       </div>
       <style jsx>{` 
