@@ -73,25 +73,21 @@ export default function Home() {
         </p>
 
         {/* 👇 LIEN CORRIGÉ VERS /LOGIN */}
-        <Link href="/login">
-          <button 
-            onMouseOver={(e) => e.currentTarget.style.transform = "scale(1.05)"}
-            onMouseOut={(e) => e.currentTarget.style.transform = "scale(1)"}
-            style={{ 
-              padding: "18px 45px", 
-              fontSize: "1.2rem", 
-              backgroundColor: "#e50914", 
-              color: "white", 
-              border: "none", 
-              borderRadius: "50px", 
-              cursor: "pointer",
-              fontWeight: "bold",
-              transition: "transform 0.2s",
-              boxShadow: "0 4px 15px #e50914"
-            }}
-          >
-            Trouver mon film 🍿
-          </button>
+        {/* Un <Link> stylé (et non <Link><button>, HTML invalide). Animation de survol : classes .cta / .cta-primary */}
+        <Link
+          href="/login"
+          className="cta cta-primary"
+          style={{ 
+            display: "inline-block",
+            padding: "18px 45px", 
+            fontSize: "1.2rem", 
+            backgroundColor: "#e50914", 
+            color: "white", 
+            borderRadius: "50px", 
+            fontWeight: "bold",
+          }}
+        >
+          Trouver mon film 🍿
         </Link>
       </div>
     </div>

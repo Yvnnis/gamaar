@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState, forwardRef, createRef } from "react";
+import { useEffect, useRef, useState, forwardRef, createRef } from "react";
 import Link from "next/link";
 import Navbar from "../../components/Navbar";
 import { CSSTransition, TransitionGroup } from "react-transition-group";
 import { useMediaInteraction } from "../../hooks/useMediaInteraction";
+import { useRefillingRail, RailItem } from "../../hooks/useRefillingRail";
 // 👇 AJOUT CLIENT SUPABASE
 import { createClient } from "@/utils/supabase/client";
 
@@ -76,95 +77,105 @@ const DiscoverCard = forwardRef<HTMLAnchorElement, { item: any, onInteract: (id:
 );
 DiscoverCard.displayName = "DiscoverCard";
 
+// --- SOURCES DES RAILS (fonctions stables, paginées) ---
+const TMDB = "https://api.themoviedb.org/3";
+const API_KEY = process.env.NEXT_PUBLIC_TMDB_API_KEY;
+const getJson = (url: string) => fetch(url).then((r) => r.json());
+
+const fetchTrendingPage = (page: number) =>
+  getJson(`${TMDB}/trending/movie/week?api_key=${API_KEY}&language=fr-FR&page=${page}`);
+
+const fetchClassicsPage = (page: number) =>
+  getJson(`${TMDB}/discover/movie?api_key=${API_KEY}&language=fr-FR&sort_by=vote_average.desc&vote_count.gte=3000&vote_average.gte=7.8&primary_release_date.lte=2005-01-01&page=${page}`);
+
+const fetchWorldPage = (page: number) =>
+  getJson(`${TMDB}/discover/movie?api_key=${API_KEY}&language=fr-FR&sort_by=vote_average.desc&vote_count.gte=500&vote_average.gte=7.3&with_original_language=it|es|ja|ko|de&page=${page}`);
+
+const movieKey = (item: RailItem) => `movie_${item.id}`;
+
+// --- UN RAIL QUI SE RECHARGE ---
+function DiscoverRail({
+  title, color, fetchPage, excludeRef, enabled, emptyText,
+}: {
+  title: string;
+  color: string;
+  fetchPage: (page: number) => Promise<{ results: RailItem[]; total_pages?: number }>;
+  excludeRef: React.MutableRefObject<Set<string>>;
+  enabled: boolean;
+  emptyText: string;
+}) {
+  const { items, loading, exhausted, remove } = useRefillingRail({
+    fetchPage, keyOf: movieKey, excludeRef, enabled, targetSize: 20,
+  });
+
+  // Refs STABLES par carte (createRef() dans le map en recréait une à chaque rendu
+  // et cassait l'animation de sortie)
+  const nodeRefs = useRef(new Map<number, React.RefObject<HTMLAnchorElement | null>>());
+  const getNodeRef = (id: number) => {
+    if (!nodeRefs.current.has(id)) nodeRefs.current.set(id, createRef<HTMLAnchorElement>());
+    return nodeRefs.current.get(id)!;
+  };
+
+  return (
+    <section style={{ marginBottom: "60px" }}>
+      <h2 style={{ borderLeft: `5px solid ${color}`, paddingLeft: "15px", marginBottom: "25px" }}>{title}</h2>
+      <TransitionGroup className="scroll-hide" style={scrollContainerStyle}>
+        {items.map((item) => {
+          const nodeRef = getNodeRef(item.id);
+          return (
+            <CSSTransition key={item.id} timeout={400} classNames="card-transition" nodeRef={nodeRef}>
+              <DiscoverCard ref={nodeRef} item={item} onInteract={() => remove(item)} />
+            </CSSTransition>
+          );
+        })}
+      </TransitionGroup>
+      {!loading && items.length === 0 && (
+        <p style={{ color: "#555" }}>{exhausted ? emptyText : "Chargement de nouvelles pépites..."}</p>
+      )}
+    </section>
+  );
+}
+
+const scrollContainerStyle: React.CSSProperties = {
+  display: "flex",
+  gap: "20px",
+  overflowX: "auto",
+  paddingBottom: "20px",
+  scrollBehavior: "smooth",
+  scrollbarWidth: "none",
+  msOverflowStyle: "none",
+};
+
 // --- PAGE DECOUVERTE ---
 export default function DiscoverPage() {
-  const supabase = createClient(); // 👈 INIT SUPABASE
+  const supabase = createClient();
 
-  const [trending, setTrending] = useState<any[]>([]);
-  const [classics, setClassics] = useState<any[]>([]);
-  const [discovery, setDiscovery] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  
-  // IDs cachés localement (l'animation)
-  const [hiddenIds, setHiddenIds] = useState<number[]>([]);
+  // Set partagé : historique Supabase + tout ce qui est déjà affiché dans un rail
+  const excludeRef = useRef<Set<string>>(new Set());
+  const [historyReady, setHistoryReady] = useState(false);
 
   useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      const apiKey = process.env.NEXT_PUBLIC_TMDB_API_KEY;
-      const baseUrl = "https://api.themoviedb.org/3";
-
+    const loadHistory = async () => {
       try {
-        // 1. RÉCUPÉRER L'USER & L'HISTORIQUE SUPABASE
         const { data: { user } } = await supabase.auth.getUser();
-        const historySet = new Set<number>(); // On stocke les IDs (films uniquement pour simplifier ici)
-
         if (user) {
-            const { data: interactions } = await supabase
-                .from("user_interactions")
-                .select("tmdb_id")
-                .eq("user_id", user.id)
-                .eq("media_type", "movie"); // On filtre movie pour cette page
-            
-            if (interactions) {
-                interactions.forEach(i => historySet.add(i.tmdb_id));
-            }
+          const { data: interactions } = await supabase
+            .from("user_interactions")
+            .select("tmdb_id, media_type")
+            .eq("user_id", user.id)
+            .eq("media_type", "movie");
+          interactions?.forEach((i) => excludeRef.current.add(`movie_${i.tmdb_id}`));
         }
-
-        const uniqueIds = new Set<number>();
-        // On ajoute l'historique aux IDs uniques pour ne pas les fetcher/afficher
-        historySet.forEach(id => uniqueIds.add(id));
-
-        // 2. TENDANCES
-        const trendReq = await fetch(`${baseUrl}/trending/movie/week?api_key=${apiKey}&language=fr-FR`);
-        const trendData = await trendReq.json();
-        const trendResults = (trendData.results || []).filter((m: any) => {
-            if (uniqueIds.has(m.id)) return false; // 🚫 Déjà vu/liké
-            uniqueIds.add(m.id);
-            return true;
-        });
-        setTrending(trendResults);
-
-        // 3. CLASSIQUES
-        const classicReq = await fetch(`${baseUrl}/discover/movie?api_key=${apiKey}&language=fr-FR&sort_by=vote_average.desc&vote_count.gte=3000&vote_average.gte=8.0&release_date.lte=2005-01-01`);
-        const classicData = await classicReq.json();
-        const classicFiltered = (classicData.results || []).filter((m: any) => {
-            if (uniqueIds.has(m.id)) return false; // 🚫 Déjà vu/liké
-            uniqueIds.add(m.id);
-            return true;
-        });
-        setClassics(classicFiltered);
-
-        // 4. DÉCOUVERTE (Cinéma du monde)
-        const discoveryReq = await fetch(`${baseUrl}/discover/movie?api_key=${apiKey}&language=fr-FR&sort_by=vote_average.desc&vote_count.gte=500&vote_average.gte=7.5&with_original_language=it|es|ja|ko|de&page=1`);
-        const discoveryData = await discoveryReq.json();
-        const discoveryFiltered = (discoveryData.results || []).filter((m: any) => {
-            if (uniqueIds.has(m.id)) return false; // 🚫 Déjà vu/liké
-            uniqueIds.add(m.id);
-            return true;
-        });
-        setDiscovery(discoveryFiltered);
-
-      } catch (error) { console.error(error); } finally { setLoading(false); }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setHistoryReady(true);
+      }
     };
-    fetchData();
+    loadHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleHideMovie = (id: number) => {
-    setHiddenIds((prev) => [...prev, id]);
-  };
-
-  const filterVisible = (list: any[]) => list.filter(item => !hiddenIds.includes(item.id));
-
-  const scrollContainerStyle: React.CSSProperties = {
-    display: "flex",
-    gap: "20px",
-    overflowX: "auto",
-    paddingBottom: "20px",
-    scrollBehavior: "smooth",
-    scrollbarWidth: "none",
-    msOverflowStyle: "none", 
-  };
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#141414", color: "white", fontFamily: "sans-serif" }}>
@@ -193,58 +204,18 @@ export default function DiscoverPage() {
           Des succès du moment aux horizons lointains.
         </p>
 
-        {loading ? (
+        {!historyReady ? (
             <div style={{ height: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <p>Chargement des collections...</p>
             </div>
         ) : (
-            <div style={{ paddingLeft: "40px" }}> 
-                
-                {/* SECTION 1 : TENDANCES */}
-                <section style={{ marginBottom: "60px" }}>
-                    <h2 style={{ borderLeft: "5px solid #e50914", paddingLeft: "15px", marginBottom: "25px" }}>🔥 Ça cartonne en ce moment</h2>
-                    <TransitionGroup className="scroll-hide" style={scrollContainerStyle}>
-                        {filterVisible(trending).map(item => {
-                            const nodeRef = createRef<HTMLAnchorElement>(); // Ref stable pour l'animation
-                            return (
-                                <CSSTransition key={item.id} timeout={400} classNames="card-transition" nodeRef={nodeRef}>
-                                    <DiscoverCard ref={nodeRef} item={item} onInteract={handleHideMovie} />
-                                </CSSTransition>
-                            );
-                        })}
-                    </TransitionGroup>
-                    {filterVisible(trending).length === 0 && <p style={{color: "#555"}}>Wow, vous êtes à jour sur les tendances !</p>}
-                </section>
-
-                {/* SECTION 2 : CLASSIQUES */}
-                <section style={{ marginBottom: "60px" }}>
-                    <h2 style={{ borderLeft: "5px solid #f1c40f", paddingLeft: "15px", marginBottom: "25px" }}>🍷 Les Incontournables (Classiques)</h2>
-                    <TransitionGroup className="scroll-hide" style={scrollContainerStyle}>
-                        {filterVisible(classics).map(item => {
-                            const nodeRef = createRef<HTMLAnchorElement>();
-                            return (
-                                <CSSTransition key={item.id} timeout={400} classNames="card-transition" nodeRef={nodeRef}>
-                                    <DiscoverCard ref={nodeRef} item={item} onInteract={handleHideMovie} />
-                                </CSSTransition>
-                            );
-                        })}
-                    </TransitionGroup>
-                </section>
-
-                {/* SECTION 3 : HORS ZONE DE CONFORT */}
-                <section style={{ marginBottom: "60px" }}>
-                    <h2 style={{ borderLeft: "5px solid #3498db", paddingLeft: "15px", marginBottom: "25px" }}>🌍 Sortir de sa zone de confort</h2>
-                    <TransitionGroup className="scroll-hide" style={scrollContainerStyle}>
-                        {filterVisible(discovery).map(item => {
-                            const nodeRef = createRef<HTMLAnchorElement>();
-                            return (
-                                <CSSTransition key={item.id} timeout={400} classNames="card-transition" nodeRef={nodeRef}>
-                                    <DiscoverCard ref={nodeRef} item={item} onInteract={handleHideMovie} />
-                                </CSSTransition>
-                            );
-                        })}
-                    </TransitionGroup>
-                </section>
+            <div style={{ paddingLeft: "40px" }}>
+                <DiscoverRail title="🔥 Ça cartonne en ce moment" color="#e50914" fetchPage={fetchTrendingPage}
+                    excludeRef={excludeRef} enabled={historyReady} emptyText="Wow, vous êtes à jour sur les tendances !" />
+                <DiscoverRail title="🍷 Les Incontournables (Classiques)" color="#f1c40f" fetchPage={fetchClassicsPage}
+                    excludeRef={excludeRef} enabled={historyReady} emptyText="Vous avez fait le tour des classiques, chapeau !" />
+                <DiscoverRail title="🌍 Sortir de sa zone de confort" color="#3498db" fetchPage={fetchWorldPage}
+                    excludeRef={excludeRef} enabled={historyReady} emptyText="Plus rien à explorer ici pour le moment." />
             </div>
         )}
       </div>
